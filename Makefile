@@ -9,17 +9,19 @@ clean:
 	rm -rf bin/ pkg/
 	rm -rf src/code.google.com src/gopkg.in
 
-imports:
+fix:
 	goimports -l -w *.go
 
-compile: imports
+compile:
 	go build
 
 start:
 	./miday
 
+INSTALL = $(shell which brew || which apt-get || which yum)
+
 deps:
-	sudo apt-get install libportmidi-dev portaudio19-dev
+	sudo ${INSTALL} install libportmidi-dev portaudio19-dev
 	go get \
 		gopkg.in/qml.v0 \
 		code.google.com/p/go.tools/cmd/goimports \
