@@ -5,6 +5,10 @@ all: compile
 
 run: compile start
 
+clean:
+	rm -rf bin/ pkg/
+	rm -rf src/code.google.com src/gopkg.in
+
 imports:
 	goimports -l -w *.go
 
