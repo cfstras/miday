@@ -5,3 +5,4 @@ miday
 *.exe
 *.o
 *.a
+src/
