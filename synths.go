@@ -8,8 +8,10 @@ import (
 )
 
 type Note struct {
-	note uint8
-	vel  uint8
+	note      uint8
+	vel       uint8
+	lastPhase bool
+	lastVal   float64
 }
 
 type Synth struct {
@@ -17,7 +19,6 @@ type Synth struct {
 	notes       [16]Note
 	phases      [256]float64
 	volume      float64
-	notesOn     int
 	totalVolume float64
 	scaleVolume float64
 }
@@ -51,31 +52,27 @@ func (s *Synth) Route() {
 		switch st {
 		case 0x8: // note off
 			fmt.Println("note", note, "off")
-			if pos.vel > 0 && pos.note == note {
-				s.notesOn--
-				s.totalVolume -= float64(pos.vel) / 127
+			if pos.note == note {
+				pos.lastPhase = true
 			}
-			pos.vel = 0
-			s.phases[note] = 0
 
 		case 0x9: // note on
 			fmt.Println("note", note, vel)
-			if pos.vel == 0 {
-				s.notesOn++
-				s.totalVolume += float64(vel) / 127
-			} else {
-				s.totalVolume += float64(vel)/127 - float64(pos.vel)/127
-			}
+			pos.lastPhase = false
 			pos.vel = vel
 			pos.note = note
 		default:
 			fmt.Printf("unknown st %x, note %d, vel %d\n", st, note, vel)
 			// ignore other commands
 		}
+		s.totalVolume = 0
+		for _, n := range s.notes {
+			s.totalVolume += float64(n.vel) / 127
+		}
 		if s.totalVolume > 1 {
-			s.scaleVolume = 1 / s.totalVolume
+			s.scaleVolume = 0.75 / s.totalVolume
 		} else {
-			s.scaleVolume = 1
+			s.scaleVolume = 0.75
 		}
 	}
 }
@@ -84,22 +81,24 @@ func (s *SineSynth) Process(InBufs [][]float32, OutBufs [][]float32) {
 	for i := range OutBufs[0] {
 		OutBufs[0][i] = 0
 		OutBufs[1][i] = 0
-		for _, note := range s.notes {
+		for i2 := range s.notes {
+			note := &s.notes[i2]
 			if note.vel == 0 {
 				continue
 			}
 			val := s.volume * math.Sin(2*math.Pi*s.phases[note.note]) * (float64(note.vel) / 127)
+			if note.lastPhase && math.Copysign(val, note.lastVal) != val {
+				note.vel = 0
+				s.phases[note.note] = 0
+				note.lastPhase = false
+			}
+			note.lastVal = val
 
 			OutBufs[0][i] += float32(val * s.scaleVolume)
 			OutBufs[1][i] += float32(val * s.scaleVolume)
 
 			step := math.Exp2((float64(note.note)-69)/12) * 440 / sampleRate
-			//step := 440.0 / sampleRate
-
 			_, s.phases[note.note] = math.Modf(s.phases[note.note] + step)
-		}
-		if OutBufs[0][i] > 1 {
-			OutBufs[0][i] = 1
 		}
 	}
 }
