@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 
 	audio "code.google.com/p/portaudio-go/portaudio"
@@ -27,8 +29,9 @@ type Stream struct {
 
 type MidiStream struct {
 	Stream
-	midi   *midi.Stream
-	events <-chan midi.Event
+	midi      *midi.Stream
+	eventsIn  <-chan midi.Event
+	eventsOut chan<- midi.Event
 }
 
 type AudioStream struct {
@@ -47,8 +50,12 @@ type AudioEffect interface {
 var streams Streams
 var errors chan error
 var printer chan midi.Event
+var devicePrefix string
 
 func main() {
+	flag.StringVar(&devicePrefix, "prefix", "", "MIDI device prefix to filter devices")
+	flag.Parse()
+
 	fmt.Println("hello, miday")
 	streams = Streams{}
 
@@ -68,17 +75,28 @@ func main() {
 	}(printer)
 
 	midi.Initialize()
-	defer midi.Terminate()
+	defer exit()
 	audio.Initialize()
-	defer audio.Terminate()
+
+	sigChan := make(chan os.Signal)
+	go func(ch <-chan os.Signal) {
+		for _ = range ch {
+			exit()
+		}
+	}(sigChan)
+	signal.Notify(sigChan)
+
 	streams.initMidi()
 	streams.initAudio()
 
 	router := MidiRouter{}
 	for _, str := range streams.MidiIns {
-		router.Inputs = append(router.Inputs, str.events)
+		router.Inputs = append(router.Inputs, str.eventsIn)
 	}
 	router.Outputs = []chan<- midi.Event{}
+	for _, str := range streams.MidiOuts {
+		router.Outputs = append(router.Outputs, str.eventsOut)
+	}
 
 	sineSynth := &SineSynth{}
 	sineSynth.input = make(chan midi.Event, 8)
@@ -86,25 +104,53 @@ func main() {
 	router.Outputs = append(router.Outputs, sineSynth.input)
 	streams.Audio.Ops = append(streams.Audio.Ops, sineSynth)
 
-	go sineSynth.Route()
-	go router.Route()
-	go streams.startAudio()
-	defer streams.stopAudio()
+	go func() {
+		go sineSynth.Route()
+		go router.Route()
+		go streams.startAudio()
+		defer streams.stopAudio()
+	}()
+
+	//RunGui()
 
 	bio := bufio.NewReader(os.Stdin)
 	bio.ReadLine()
 }
 
+func exit() {
+	streams.Audio.audio.Close()
+	for _, s := range streams.MidiIns {
+		s.midi.Close()
+	}
+	streams.MidiIns = streams.MidiIns[:0]
+	for _, s := range streams.MidiOuts {
+		close(s.eventsOut)
+		s.midi.Close()
+	}
+	streams.MidiIns = streams.MidiOuts[:0]
+	audio.Terminate()
+	midi.Terminate()
+	os.Exit(0)
+}
+
 func (streams *Streams) initMidi() {
-	streams.MidiIns = append(streams.MidiIns, openMidis(true, "LPK")...)
-	streams.MidiOuts = append(streams.MidiOuts, openMidis(false, "LPK")...)
+	streams.MidiIns = append(streams.MidiIns, openMidis(true, devicePrefix)...)
+	streams.MidiOuts = append(streams.MidiOuts, openMidis(false, devicePrefix)...)
+}
+
+func getMidiDevices() (res []*midi.DeviceInfo) {
+	num := midi.DeviceId(midi.CountDevices())
+	for i := midi.DeviceId(0); i < num; i++ {
+		info := midi.GetDeviceInfo(i)
+		res = append(res, info)
+	}
+	return
 }
 
 func openMidis(doInput bool, filter string) []*MidiStream {
 	var strs []*MidiStream
-	num := midi.DeviceId(midi.CountDevices())
-	for i := midi.DeviceId(0); i < num; i++ {
-		info := midi.GetDeviceInfo(i)
+	for ii, info := range getMidiDevices() {
+		i := midi.DeviceId(ii)
 		if info.IsOpened {
 			continue
 		}
@@ -128,12 +174,20 @@ func openMidis(doInput bool, filter string) []*MidiStream {
 			errors <- err
 			continue
 		}
-		var ch <-chan midi.Event
+		var chIn <-chan midi.Event
+		var chOut chan midi.Event
 		if doInput {
-			ch = stream.Listen()
+			chIn = stream.Listen()
+		} else {
+			chOut = make(chan midi.Event)
+			go func(ch <-chan midi.Event) {
+				for e := range ch {
+					stream.Write([]midi.Event{e})
+				}
+			}(chOut)
 		}
 		str := &MidiStream{Stream{info.Name, info.Interface},
-			stream, ch}
+			stream, chIn, chOut}
 		strs = append(strs, str)
 	}
 	return strs
